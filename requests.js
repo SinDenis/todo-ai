@@ -10,6 +10,66 @@ const formatDateForDisplay = (dateString) => {
     return new Date(dateString).toLocaleString();
 };
 
+// Helper function to get color from gradient
+function getGradientColor(score) {
+    // Define gradient colors from red to yellow to green
+    const colors = [
+        { score: 0.00, color: '#ff1744' }, // Red
+        { score: 0.25, color: '#ff6d00' }, // Orange
+        { score: 0.50, color: '#ffd600' }, // Yellow
+        { score: 0.75, color: '#76ff03' }, // Light green
+        { score: 1.00, color: '#00c853' }  // Green
+    ];
+    
+    // Find the two colors to interpolate between
+    let color1, color2;
+    for (let i = 0; i < colors.length - 1; i++) {
+        if (score >= colors[i].score && score <= colors[i + 1].score) {
+            color1 = colors[i];
+            color2 = colors[i + 1];
+            break;
+        }
+    }
+    
+    if (!color1 || !color2) {
+        return score <= 0 ? colors[0].color : colors[colors.length - 1].color;
+    }
+    
+    // Calculate interpolation factor
+    const factor = (score - color1.score) / (color2.score - color1.score);
+    
+    // Convert hex to RGB and interpolate
+    const rgb1 = hexToRgb(color1.color);
+    const rgb2 = hexToRgb(color2.color);
+    
+    const r = Math.round(rgb1.r + factor * (rgb2.r - rgb1.r));
+    const g = Math.round(rgb1.g + factor * (rgb2.g - rgb1.g));
+    const b = Math.round(rgb1.b + factor * (rgb2.b - rgb1.b));
+    
+    return `rgb(${r}, ${g}, ${b})`;
+}
+
+// Helper function to convert hex to RGB
+function hexToRgb(hex) {
+    const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+    return result ? {
+        r: parseInt(result[1], 16),
+        g: parseInt(result[2], 16),
+        b: parseInt(result[3], 16)
+    } : null;
+}
+
+// Function to format similarity score for display
+function formatSimilarityScore(score) {
+    if (!score) return 'N/A';
+    const percentage = (score * 100).toFixed(1);
+    const color = getGradientColor(score);
+    
+    // Add CSS variable for the color to use in todo item styling
+    const style = `color: ${color}; --match-color: ${color};`;
+    return `<span style="${style}">${percentage}%</span>`;
+}
+
 // Function to create a todo
 async function createTodo(todo) {
     try {
@@ -91,14 +151,106 @@ async function getTodo(todoId) {
     }
 }
 
+// Function to fetch todos by IDs
+async function fetchTodosByIds(ids) {
+    try {
+        const response = await fetch(`${API_BASE_URL}/todos/by-ids`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ ids })
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        return await response.json();
+    } catch (error) {
+        console.error('Failed to fetch todos by IDs:', error);
+        return null;
+    }
+}
+
 // Function to process user input with LLM
 async function processUserInput(input, context = null) {
     try {
-        const messages = [
+        let similarTodosContext = "";
+        
+        // Only make the backend search request if we don't have context
+        if (!context) {
+            const searchResponse = await fetch(`${API_BASE_URL}/similar-todos?query=${encodeURIComponent(input)}`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            });
+
+            if (searchResponse.ok) {
+                const similarTodos = await searchResponse.json();
+                if (similarTodos.items && similarTodos.items.length > 0) {
+                    similarTodosContext = "Similar existing todos:\n" + 
+                        similarTodos.items.map(todo => 
+                            `- ${todo.name}: ${todo.description}`
+                        ).join('\n');
+                }
+            }
+        }
+
+        // First prompt to determine operation
+        const operationMessages = [
             {
                 role: "system",
-                content: `You are a todo list assistant. Your job is to create structured todos from user input. Always ensure all required fields are filled with meaningful content.
+                content: `You are a todo list operation classifier. Your job is to determine what operation the user wants to perform.
+                Possible operations are:
+                - create: When user wants to create one or more new todos
+                - delete: When user wants to remove existing todos
+                - search: When user wants to find or list existing todos
+                - update: When user wants to modify existing todos
 
+                Respond with ONLY ONE of these exact words: "create", "delete", "search", "update"
+                `
+            }
+        ];
+
+        if (context) {
+            operationMessages.push({
+                role: "system",
+                content: "User is currently working with an existing todo, so this is likely an update operation."
+            });
+        }
+
+        operationMessages.push({
+            role: "user",
+            content: input
+        });
+
+        // Get operation decision
+        const operationResponse = await fetch(OPENAI_API_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${OPENAI_API_KEY}`
+            },
+            body: JSON.stringify({
+                model: "gpt-3.5-turbo",
+                messages: operationMessages,
+                temperature: 0.1,
+                max_tokens: 10
+            })
+        });
+
+        if (!operationResponse.ok) {
+            throw new Error(`Operation LLM API error: ${operationResponse.status}`);
+        }
+
+        const operationData = await operationResponse.json();
+        const operation = operationData.choices[0].message.content.trim().toLowerCase();
+
+        // Second prompt based on operation
+        const operationPrompts = {
+            create: `You are a todo creation assistant. Create structured todos from user input.
                 Rules:
                 1. Name must be clear and concise (max 50 chars)
                 2. Description must provide detailed context (min 20 chars, max 200 chars)
@@ -107,109 +259,91 @@ async function processUserInput(input, context = null) {
                    - If no time specified, default to 1 day
                    - Never leave deadline empty
                    - Convert all time references to number of days (e.g., "next week" = 7)
-                4. For search/delete, extract meaningful search terms
-                5. For updates, ensure all fields are properly filled
-                6. When user provides multiple tasks, create separate entries for each task
-                7. Maximum 5 tasks per input to prevent overload
-                8. For updates:
-                   - Use the provided todo context to understand what's being updated
-                   - Only include fields that need to be changed
-                   - Maintain existing values for unchanged fields
-                   - Use the todo's ID from the context
+                4. Maximum 5 tasks per input to prevent overload
 
-                Respond in JSON format with the following structure:
+                Respond in JSON format:
                 {
-                    "action": "create" | "delete" | "search" | "update",
+                    "action": "create",
                     "data": {
-                        // For single task create:
+                        // For single task:
                         "name": "task name",
                         "description": "task description",
-                        "deadline": "suggested deadline in days from now"
+                        "deadline": "days from now"
                         
-                        // For multiple tasks create:
+                        // OR for multiple tasks:
                         "tasks": [
                             {
                                 "name": "task 1 name",
                                 "description": "task 1 description",
-                                "deadline": "deadline in days"
-                            },
-                            {
-                                "name": "task 2 name",
-                                "description": "task 2 description",
-                                "deadline": "deadline in days"
+                                "deadline": "days"
                             }
                         ]
-                        
-                        // For delete/search:
+                    }
+                }`,
+
+            delete: `You are a todo deletion assistant. Extract search terms to identify todos for deletion.
+                Rules:
+                1. Extract the most specific search terms possible
+                2. If an ID is mentioned, use that
+                3. Consider task names and key identifiers
+
+                Respond in JSON format:
+                {
+                    "action": "delete",
+                    "data": {
                         "searchTerm": "search term or id"
-                        
-                        // For update:
-                        "todoId": "id of todo to update",
+                    }
+                }`,
+
+            search: `You are a todo search assistant. Extract search terms to find relevant todos.
+                Rules:
+                1. Extract meaningful search terms
+                2. Consider task names, descriptions, and dates
+                3. If an ID is mentioned, use that
+
+                Respond in JSON format:
+                {
+                    "action": "search",
+                    "data": {
+                        "searchTerm": "search term or id"
+                    }
+                }`,
+
+            update: `You are a todo update assistant. Determine what fields need to be updated.
+                Rules:
+                1. Only include fields that need to be changed
+                2. For deadline changes, convert to number of days from now
+                3. Maintain existing values for unchanged fields
+                4. Use the todo's ID from context
+
+                Respond in JSON format:
+                {
+                    "action": "update",
+                    "data": {
+                        "todoId": "id from context",
                         "updates": {
                             "name": "new name",
                             "description": "new description",
                             "deadline": "new deadline in days"
                         }
                     }
-                }
-                
-                Example responses:
-                1. Input: "I need to: 1. buy groceries tomorrow, 2. call dentist next week, 3. fix the car by friday"
-                  Output: {
-                      "action": "create",
-                      "data": {
-                          "tasks": [
-                              {
-                                  "name": "Buy Groceries",
-                                  "description": "Purchase necessary groceries and household items for daily needs",
-                                  "deadline": 1
-                              },
-                              {
-                                  "name": "Call Dentist",
-                                  "description": "Schedule dental appointment and discuss treatment plan",
-                                  "deadline": 7
-                              },
-                              {
-                                  "name": "Fix Car",
-                                  "description": "Take car to mechanic for repairs and maintenance",
-                                  "deadline": 3
-                              }
-                          ]
-                      }
-                  }
+                }`
+        };
 
-                2. Input: "need to prepare presentation for next week"
-                   Output: {
-                       "action": "create",
-                       "data": {
-                           "name": "Prepare Presentation",
-                           "description": "Create and finalize presentation materials, including slides, notes, and supporting documents",
-                           "deadline": 7
-                       }
-                   }
-
-                3. Input: "remove the grocery task"
-                   Output: {
-                       "action": "delete",
-                       "data": {
-                           "searchTerm": "grocery"
-                       }
-                   }
-                
-                4. Input: "change the deadline to next friday" (with todo context)
-                   Output: {
-                       "action": "update",
-                       "data": {
-                           "todoId": 123,
-                           "updates": {
-                               "deadline": 5
-                           }
-                       }
-                   }
-
-                Only respond with valid JSON, no additional text.`
+        const messages = [
+            {
+                role: "system",
+                content: operationPrompts[operation]
             }
         ];
+
+        // Add similar todos context if available and not updating
+        if (similarTodosContext && operation !== 'update') {
+            messages.push({
+                role: "system",
+                content: `Consider these existing todos when processing the request:\n${similarTodosContext}`
+            });
+        }
 
         // If there's context, add it before the user input
         if (context) {
@@ -232,19 +366,28 @@ async function processUserInput(input, context = null) {
             },
             body: JSON.stringify({
                 model: "gpt-3.5-turbo",
-                messages: messages
+                messages: messages,
+                temperature: 0.7,
+                max_tokens: 500
             })
         });
 
         if (!response.ok) {
+            console.error('OpenAI API error:', await response.text());
             throw new Error(`LLM API error: ${response.status}`);
         }
 
         const data = await response.json();
-        console.log(data);
+        if (!data.choices || !data.choices[0] || !data.choices[0].message) {
+            console.error('Unexpected OpenAI response:', data);
+            throw new Error('Invalid response from OpenAI');
+        }
+        
+        console.log('OpenAI response:', data);
         return JSON.parse(data.choices[0].message.content);
     } catch (error) {
         console.error('Failed to process input with LLM:', error);
+        console.error('Error details:', error.stack);
         return null;
     }
 }
@@ -302,37 +445,161 @@ function createChatUI(container) {
 }
 
 // Function to add a message to the chat
-function addMessage(container, text, isUser = false) {
+function addMessage(container, content, isUser = false, isHTML = false) {
     const messageDiv = document.createElement('div');
     messageDiv.className = `chat-message ${isUser ? 'user' : 'assistant'}`;
-    messageDiv.textContent = text;
+    if (isHTML) {
+        messageDiv.innerHTML = content;
+    } else {
+        messageDiv.textContent = content;
+    }
     container.appendChild(messageDiv);
     container.scrollTop = container.scrollHeight;
 }
 
+// Function to handle todo actions
+async function handleTodoAction(action, todoId, container) {
+    try {
+        switch (action) {
+            case 'delete':
+                if (await deleteTodo(todoId)) {
+                    // Remove the todo item from UI
+                    const todoElement = container.querySelector(`[data-todo-id="${todoId}"]`);
+                    if (todoElement) {
+                        todoElement.remove();
+                    }
+                }
+                break;
+            case 'complete':
+            case 'uncomplete':
+                const response = await fetch(`${API_BASE_URL}/todos/${todoId}`, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ completed: action === 'complete' })
+                });
+                
+                if (response.ok) {
+                    // Update the todo item in UI
+                    const todoElement = container.querySelector(`[data-todo-id="${todoId}"]`);
+                    if (todoElement) {
+                        if (action === 'complete') {
+                            todoElement.classList.add('completed');
+                        } else {
+                            todoElement.classList.remove('completed');
+                        }
+                        
+                        const nameElement = todoElement.querySelector('.todo-name');
+                        if (nameElement) {
+                            nameElement.style.textDecoration = action === 'complete' ? 'line-through' : 'none';
+                        }
+                        
+                        const statusElement = todoElement.querySelector('.todo-status');
+                        if (statusElement) {
+                            statusElement.textContent = `Status: ${action === 'complete' ? 'Completed' : 'Pending'}`;
+                        }
+                        
+                        const actionsContainer = todoElement.querySelector('.todo-actions');
+                        if (actionsContainer) {
+                            const newButton = action === 'complete' ?
+                                `<button class="uncomplete-action" onclick="handleTodoAction('uncomplete', ${todoId}, this.closest('.${container.classList.contains('chat-todos-list') ? 'chat-todos-list' : 'todos-list'}'))">Uncomplete</button>` :
+                                `<button class="complete-action" onclick="handleTodoAction('complete', ${todoId}, this.closest('.${container.classList.contains('chat-todos-list') ? 'chat-todos-list' : 'todos-list'}'))">Complete</button>`;
+                            
+                            const deleteButton = actionsContainer.querySelector('.delete-action').outerHTML;
+                            actionsContainer.innerHTML = deleteButton + newButton;
+                        }
+                    }
+                }
+                break;
+        }
+    } catch (error) {
+        console.error(`Failed to ${action} todo ${todoId}:`, error);
+    }
+}
+
 // Function to render todos in the list
 function renderTodosList(todos, container) {
-    // Sort todos by creation date, newest first
-    const sortedTodos = [...todos].sort((a, b) => 
-        new Date(b.created_at) - new Date(a.created_at)
-    );
+    // Sort todos by similarity score (if present) then by creation date
+    const sortedTodos = [...todos].sort((a, b) => {
+        if (a.similarity_score !== undefined && b.similarity_score !== undefined) {
+            return b.similarity_score - a.similarity_score;
+        }
+        return new Date(b.created_at) - new Date(a.created_at);
+    });
     
     container.innerHTML = sortedTodos.map(todo => `
-        <div class="todo-item ${todo.completed ? 'completed' : ''}">
+        <div class="todo-item ${todo.completed ? 'completed' : ''} ${todo.similarity_score ? 'with-score' : ''}" 
+             data-todo-id="${todo.id}">
             <div class="todo-header">
-                <h3>${todo.name}</h3>
-                <span class="todo-id">#${todo.id}</span>
+                <h3 class="todo-name" style="${todo.completed ? 'text-decoration: line-through;' : ''}">${todo.name}</h3>
+                <div class="todo-meta">
+                    ${todo.similarity_score !== undefined ? 
+                        `<span class="similarity-score">Match: ${formatSimilarityScore(todo.similarity_score)}</span>` 
+                        : ''}
+                    <span class="todo-id">#${todo.id}</span>
+                </div>
             </div>
             <p>${todo.description}</p>
             <div class="todo-dates">
                 <span>Created: ${formatDateForDisplay(todo.created_at)}</span>
                 <span>Deadline: ${formatDateForDisplay(todo.deadline)}</span>
             </div>
-            <div class="todo-status">
-                Status: ${todo.completed ? 'Completed' : 'Pending'}
+            <div class="todo-footer">
+                <div class="todo-status">
+                    Status: ${todo.completed ? 'Completed' : 'Pending'}
+                </div>
+                <div class="todo-actions">
+                    <button class="delete-action" onclick="handleTodoAction('delete', ${todo.id}, this.closest('.todos-list'))">Delete</button>
+                    ${todo.completed ? 
+                        `<button class="uncomplete-action" onclick="handleTodoAction('uncomplete', ${todo.id}, this.closest('.todos-list'))">Uncomplete</button>` :
+                        `<button class="complete-action" onclick="handleTodoAction('complete', ${todo.id}, this.closest('.todos-list'))">Complete</button>`
+                    }
+                </div>
             </div>
         </div>
     `).join('');
+}
+
+// Function to render todos in chat
+function renderTodosInChat(todos, container) {
+    const todosHTML = `
+        <div class="chat-todos-list">
+            <div class="chat-todos-header">Found ${todos.length} relevant todos:</div>
+            ${todos.map(todo => `
+                <div class="chat-todo-item ${todo.completed ? 'completed' : ''} ${todo.similarity_score ? 'with-score' : ''}"
+                     data-todo-id="${todo.id}">
+                    <div class="todo-header">
+                        <h4 class="todo-name" style="${todo.completed ? 'text-decoration: line-through;' : ''}">${todo.name}</h4>
+                        <div class="todo-meta">
+                            ${todo.similarity_score !== undefined ? 
+                                `<span class="similarity-score">Match: ${formatSimilarityScore(todo.similarity_score)}</span>` 
+                                : ''}
+                            <span class="todo-id">#${todo.id}</span>
+                        </div>
+                    </div>
+                    <p class="todo-description">${todo.description}</p>
+                    <div class="todo-dates">
+                        <span>Created: ${formatDateForDisplay(todo.created_at)}</span>
+                        <span>Deadline: ${formatDateForDisplay(todo.deadline)}</span>
+                    </div>
+                    <div class="todo-footer">
+                        <div class="todo-status">
+                            Status: ${todo.completed ? 'Completed' : 'Pending'}
+                        </div>
+                        <div class="todo-actions">
+                            <button class="delete-action" onclick="handleTodoAction('delete', ${todo.id}, this.closest('.chat-todos-list'))">Delete</button>
+                            ${todo.completed ? 
+                                `<button class="uncomplete-action" onclick="handleTodoAction('uncomplete', ${todo.id}, this.closest('.chat-todos-list'))">Uncomplete</button>` :
+                                `<button class="complete-action" onclick="handleTodoAction('complete', ${todo.id}, this.closest('.chat-todos-list'))">Complete</button>`
+                            }
+                        </div>
+                    </div>
+                </div>
+            `).join('')}
+        </div>
+    `;
+    addMessage(container, todosHTML, false, true);
 }
 
 // Function to update the todos list
@@ -357,17 +624,143 @@ async function handleUserInput(input, ui) {
     
     addMessage(ui.messagesContainer, input, true);
     
-    const result = await processUserInput(input);
-    if (!result) {
-        addMessage(ui.messagesContainer, "Sorry, I couldn't process your request.");
-        // Reset loading state
-        ui.input.disabled = false;
-        ui.sendButton.disabled = false;
-        ui.sendButton.textContent = 'Send';
-        return;
-    }
-
     try {
+        // Get similar todos first
+        const searchResponse = await fetch(`${API_BASE_URL}/similar-todos?query=${encodeURIComponent(input)}`, {
+            method: 'GET',
+            headers: {
+                'Content-Type': 'application/json',
+            }
+        });
+
+        let similarTodos = [];
+        if (searchResponse.ok) {
+            const response = await searchResponse.json();
+            similarTodos = response.items || [];
+        }
+
+        // First prompt to determine operation
+        const operationMessages = [
+            {
+                role: "system",
+                content: `You are a todo list operation classifier. Your job is to determine what operation the user wants to perform.
+                Possible operations are:
+                - create: When user wants to create one or more new todos
+                - delete: When user wants to remove existing todos
+                - search: When user wants to find or list existing todos
+                - update: When user wants to modify existing todos
+
+                Respond with ONLY ONE of these exact words: "create", "delete", "search", "update"
+                `
+            },
+            {
+                role: "user",
+                content: input
+            }
+        ];
+
+        const operationResponse = await fetch(OPENAI_API_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${OPENAI_API_KEY}`
+            },
+            body: JSON.stringify({
+                model: "gpt-3.5-turbo",
+                messages: operationMessages,
+                temperature: 0.1,
+                max_tokens: 10
+            })
+        });
+
+        if (!operationResponse.ok) {
+            throw new Error(`Operation LLM API error: ${operationResponse.status}`);
+        }
+
+        const operationData = await operationResponse.json();
+        const operation = operationData.choices[0].message.content.trim().toLowerCase();
+
+        // For search operation, use LLM to analyze similar todos
+        if (operation === 'search' && similarTodos.length > 0) {
+            const searchMessages = [
+                {
+                    role: "system",
+                    content: `You are a todo search assistant. Analyze the user's search query and the available todos to find the most relevant matches.
+                    Rules:
+                    1. Consider semantic similarity, not just exact matches
+                    2. Look for matches in task names, descriptions, and deadlines
+                    3. Rank results by relevance
+                    4. Return a JSON array of todo IDs in order of relevance
+                    5. Only include todos that are truly relevant to the query
+                    6. Consider dates and time references in the query
+                    7. Consider similarity scores in ranking (higher is better)
+                    8. Only include todos with similarity score above 0.1 (10%)
+
+                    Available todos with similarity scores:
+                    ${JSON.stringify(similarTodos, null, 2)}
+
+                    Respond with a JSON array of todo IDs in order of relevance.
+                    Example: [5, 2, 8]
+                    `
+                },
+                {
+                    role: "user",
+                    content: input
+                }
+            ];
+
+            const searchResponse = await fetch(OPENAI_API_URL, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${OPENAI_API_KEY}`
+                },
+                body: JSON.stringify({
+                    model: "gpt-3.5-turbo",
+                    messages: searchMessages,
+                    temperature: 0.2,
+                    max_tokens: 100
+                })
+            });
+
+            if (!searchResponse.ok) {
+                throw new Error(`Search LLM API error: ${searchResponse.status}`);
+            }
+
+            const searchData = await searchResponse.json();
+            const relevantIds = JSON.parse(searchData.choices[0].message.content);
+            
+            // Fetch full todo objects with their current state
+            const result = await fetchTodosByIds(relevantIds);
+            if (result && result.items.length > 0) {
+                // Add similarity scores from the similar todos
+                const todosWithScores = result.items.map(todo => {
+                    const similarTodo = similarTodos.find(st => st.id === todo.id);
+                    return {
+                        ...todo,
+                        similarity_score: similarTodo ? similarTodo.similarity_score : undefined
+                    };
+                });
+
+                // Render todos in chat
+                renderTodosInChat(todosWithScores, ui.messagesContainer);
+                
+                // Update the todos list with the search results
+                renderTodosList(todosWithScores, ui.todosList);
+                return;
+            } else {
+                addMessage(ui.messagesContainer, "No todos found matching your search criteria.");
+                return;
+            }
+        }
+
+        // For other operations, proceed with the existing logic
+        const result = await processUserInput(input);
+        if (!result) {
+            addMessage(ui.messagesContainer, "Sorry, I couldn't process your request.");
+            return;
+        }
+
         switch (result.action) {
             case 'create':
                 // Check if it's a single task or multiple tasks
@@ -408,18 +801,6 @@ async function handleUserInput(input, ui) {
                     addMessage(ui.messagesContainer, `Deleted todo: ${todoToDelete.name}`);
                 } else {
                     addMessage(ui.messagesContainer, "Couldn't find a todo matching your description.");
-                }
-                break;
-
-            case 'search':
-                const foundTodos = await fetchTodos(1, 5, result.data.searchTerm);
-                if (foundTodos && foundTodos.items.length > 0) {
-                    const resultsList = foundTodos.items
-                        .map(todo => `- ${todo.name} (Due: ${formatDateForDisplay(todo.deadline)})`)
-                        .join('\n');
-                    addMessage(ui.messagesContainer, `Found todos:\n${resultsList}`);
-                } else {
-                    addMessage(ui.messagesContainer, "No todos found matching your search.");
                 }
                 break;
 
@@ -471,14 +852,15 @@ async function handleUserInput(input, ui) {
                 }
                 break;
         }
+    } catch (error) {
+        console.error('Error processing input:', error);
+        addMessage(ui.messagesContainer, "Sorry, an error occurred while processing your request.");
     } finally {
         // Reset loading state
         ui.input.disabled = false;
         ui.sendButton.disabled = false;
         ui.sendButton.textContent = 'Send';
     }
-
-    updateTodosList(ui);
 }
 
 // Add styles
@@ -628,8 +1010,161 @@ function addStyles() {
         .chat-input-container button:disabled {
             background-color: #cccccc;
         }
+        
+        .todo-meta {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .similarity-score {
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.9em;
+            background-color: ${transparentize('var(--match-color)', 0.9)};
+            border: 1px solid var(--match-color);
+            font-weight: 500;
+        }
+        
+        .todo-item.with-score,
+        .chat-todo-item.with-score {
+            border-left: 4px solid var(--match-color);
+            background-color: ${transparentize('var(--match-color)', 0.95)};
+        }
+        
+        @property --match-color {
+            syntax: '<color>';
+            initial-value: #e0e0e0;
+            inherits: true;
+        }
+        
+        .chat-todos-list {
+            width: 100%;
+            margin: 10px 0;
+        }
+        
+        .chat-todos-header {
+            font-weight: bold;
+            margin-bottom: 10px;
+            color: #333;
+        }
+        
+        .chat-todo-item {
+            border: 1px solid #ddd;
+            margin: 8px 0;
+            padding: 12px;
+            border-radius: 4px;
+            background-color: #f9f9f9;
+            font-size: 0.95em;
+        }
+        
+        .chat-todo-item h4 {
+            margin: 0;
+            font-size: 1.1em;
+            color: #333;
+        }
+        
+        .chat-todo-item .todo-description {
+            margin: 8px 0;
+            color: #555;
+        }
+        
+        .chat-todo-item .todo-dates {
+            font-size: 0.9em;
+            color: #666;
+            margin: 8px 0;
+            display: flex;
+            gap: 15px;
+        }
+        
+        .chat-todo-item .todo-status {
+            font-size: 0.9em;
+            color: #666;
+        }
+        
+        .chat-message.assistant .chat-todo-item.with-score {
+            border-left: 4px solid;
+            border-left-color: var(--match-color, #e0e0e0);
+        }
+        
+        .chat-message.assistant .chat-todo-item.with-score[style*="--match-color: #4caf50"] {
+            background-color: #f1f8e9;
+        }
+        
+        .chat-message.assistant .chat-todo-item.with-score[style*="--match-color: #ff9800"] {
+            background-color: #fff3e0;
+        }
+        
+        .chat-message.assistant .chat-todo-item.with-score[style*="--match-color: #f44336"] {
+            background-color: #ffebee;
+        }
+        
+        .todo-footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #eee;
+        }
+        
+        .todo-actions {
+            display: flex;
+            gap: 8px;
+        }
+        
+        .todo-actions button {
+            padding: 4px 12px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9em;
+            transition: background-color 0.2s;
+        }
+        
+        .delete-action {
+            background-color: #ff5252;
+            color: white;
+        }
+        
+        .delete-action:hover {
+            background-color: #ff1744;
+        }
+        
+        .complete-action {
+            background-color: #4caf50;
+            color: white;
+        }
+        
+        .complete-action:hover {
+            background-color: #43a047;
+        }
+        
+        .uncomplete-action {
+            background-color: #ffc107;
+            color: black;
+        }
+        
+        .uncomplete-action:hover {
+            background-color: #ffb300;
+        }
+        
+        .todo-item.completed {
+            opacity: 0.8;
+            background-color: #f5f5f5;
+        }
+        
+        .chat-todo-item .todo-actions button {
+            padding: 3px 10px;
+            font-size: 0.85em;
+        }
     `;
     document.head.appendChild(style);
+}
+
+// Helper function to create transparent color
+function transparentize(color, opacity) {
+    return `color-mix(in srgb, ${color}, transparent ${opacity * 100}%)`;
 }
 
 // Initialize the application

@@ -3,18 +3,20 @@ from langchain_openai import OpenAIEmbeddings
 from sqlalchemy import select, update
 from datetime import datetime
 import os
+from .retriever import TodoRetriever
 
 def create_scheduler(app):
     scheduler = BackgroundScheduler()
     
+    embeddings = OpenAIEmbeddings(
+        openai_api_key=os.getenv('OPENAI_API_KEY'),
+        openai_api_base=os.getenv('OPENAI_API_BASE', 'https://openai-proxy.tcsbank.ru/public/v1'),
+        model="text-embedding-ada-002"
+    )
+    
     def vectorize_todos():
         with app.app_context():
             storage = app.config['storage']
-            embeddings = OpenAIEmbeddings(
-                openai_api_key=os.getenv('OPENAI_API_KEY'),
-                openai_api_base=os.getenv('OPENAI_API_BASE', 'https://openai-proxy.tcsbank.ru/public/v1'),
-                model="text-embedding-ada-002"
-            )
             
             # Get todos without embeddings
             with storage.Session() as session:

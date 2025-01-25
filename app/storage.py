@@ -60,4 +60,16 @@ class TodoStorage:
             query = query.offset((page - 1) * per_page).limit(per_page)
             
             todos = session.scalars(query).all()
-            return todos, total 
+            return todos, total
+
+    def get_by_ids(self, todo_ids: List[int]) -> List[Todo]:
+        """Get multiple todos by their IDs, maintaining the order of the input IDs"""
+        with self.Session() as session:
+            # Get all todos matching the IDs
+            todos = session.query(Todo).filter(Todo.id.in_(todo_ids)).all()
+            
+            # Create a map for quick lookup
+            todo_map = {todo.id: todo for todo in todos}
+            
+            # Return todos in the same order as input IDs
+            return [todo_map.get(id) for id in todo_ids if id in todo_map] 
