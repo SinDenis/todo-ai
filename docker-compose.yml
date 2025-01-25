@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: ankane/pgvector:latest
+    environment:
+      POSTGRES_DB: todos_db
+      POSTGRES_USER: todos_user
+      POSTGRES_PASSWORD: todos_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://todos_user:todos_password@postgres:5432/todos_db
+      OPENAI_API_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJPcGVuQUkgcHJveHkgKExEQVApIiwic3ViIjoidXNlciBhdXRoZW50aWNhdGlvbiIsImV4cCI6MTczNzkyMTUzOSwiaWF0IjoxNzM3ODM1MTM5LCJsb2dpbiI6InN2Y19tcy1qYXJ2aXMtb3BlbmFpIiwiZ3JvdXBzIjpbInRicC1vcGVuYWktcHJveHktcHVibGljLWFsbCJdfQ.ZKkuImdbDKAbCnMa4doXBmJMNq-dri8kr98l_rEMCQo
+      OPENAI_API_BASE: https://openai-proxy.tcsbank.ru/public/v1
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+    volumes:
+      - .:/app
+    command: ["sh", "./entrypoint.sh"]
+
+volumes:
+  postgres_data:

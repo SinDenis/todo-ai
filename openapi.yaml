@@ -1,0 +1,174 @@
+openapi: 3.0.0
+info:
+  title: Todo Service API
+  version: 1.0.0
+  description: A simple Todo List API with in-memory storage
+
+servers:
+  - url: http://localhost:5000/api
+    description: Local development server
+
+paths:
+  /todos:
+    get:
+      summary: List todos with pagination and search
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+          description: Page number
+        - name: per_page
+          in: query
+          schema:
+            type: integer
+            default: 10
+          description: Items per page
+        - name: search
+          in: query
+          schema:
+            type: string
+          description: Search term for filtering todos
+      responses:
+        '200':
+          description: List of todos
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Todo'
+                  total:
+                    type: integer
+                  page:
+                    type: integer
+                  per_page:
+                    type: integer
+                  pages:
+                    type: integer
+    
+    post:
+      summary: Create a new todo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TodoCreate'
+      responses:
+        '201':
+          description: Todo created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Todo'
+
+  /todos/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    
+    get:
+      summary: Get a todo by ID
+      responses:
+        '200':
+          description: Todo found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Todo'
+        '404':
+          description: Todo not found
+    
+    put:
+      summary: Update a todo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TodoUpdate'
+      responses:
+        '200':
+          description: Todo updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Todo'
+        '404':
+          description: Todo not found
+    
+    delete:
+      summary: Delete a todo
+      responses:
+        '204':
+          description: Todo deleted
+        '404':
+          description: Todo not found
+
+components:
+  schemas:
+    Todo:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        description:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        deadline:
+          type: string
+          format: date-time
+        completed:
+          type: boolean
+      required:
+        - id
+        - name
+        - description
+        - created_at
+        - deadline
+
+    TodoCreate:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        deadline:
+          type: string
+          format: date-time
+        completed:
+          type: boolean
+      required:
+        - name
+        - description
+        - deadline
+
+    TodoUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        deadline:
+          type: string
+          format: date-time
+        completed:
+          type: boolean
+      required:
+        - name
+        - description
+        - deadline 
